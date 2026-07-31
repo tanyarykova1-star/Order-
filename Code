@@ -1,0 +1,171 @@
+import asyncio
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
+from typing import List
+
+# =====================================================================
+# 1. DOMAIN LAYER (Бизнес-логика)
+# =====================================================================
+
+
+# Value Object (Объект-значение): неизменяемый объект для работы с деньгами
+@dataclass(frozen=True)
+class Money:
+    amount: float
+    currency: str = "RUB"
+
+    def add(self, other: "Money") -> "Money":
+        if self.currency != other.currency:
+            raise ValueError("Нельзя складывать разные валюты!")
+        return Money(self.amount + other.amount, self.currency)
+
+
+class OrderStatus(Enum):
+    CREATED = "created"
+    PAID = "paid"
+
+
+# Entity / Aggregate Root (Сущность): содержит бизнес-правила заказа
+class Order:
+
+    def __init__(self, order_id: str, customer_id: str):
+        self.id = order_id
+        self.customer_id = customer_id
+        self.items: List[Money] = []
+        self.status = OrderStatus.CREATED
+
+    def add_item(self, price: Money) -> None:
+        """Бизнес-правило: нельзя менять состав уже оплаченного заказа."""
+        if self.status == OrderStatus.PAID:
+            raise RuntimeError("Нельзя добавлять товары в оплаченный заказ!")
+        self.items.append(price)
+
+    @property
+    def total_price(self) -> Money:
+        total = Money(0.0)
+        for item in self.items:
+            total = total.add(item)
+        return total
+
+    def mark_as_paid(self) -> None:
+        self.status = OrderStatus.PAID
+
+
+# =====================================================================
+# 2. ABSTRACTIONS / INTERFACES (Контракты по SOLID - DIP)
+# =====================================================================
+
+
+class OrderRepository(ABC):
+    """Интерфейс для работы с базой данных (Single Responsibility)."""
+
+    @abstractmethod
+    async def save(self, order: Order) -> None:
+        pass
+
+
+class NotificationService(ABC):
+    """Интерфейс для брокера сообщений/уведомлений (Single Responsibility)."""
+
+    @abstractmethod
+    async def send_order_created(self, order: Order) -> None:
+        pass
+
+
+# =====================================================================
+# 3. INFRASTRUCTURE LAYER (Работа с внешними системами)
+# =====================================================================
+
+
+class PostgresOrderRepository(OrderRepository):
+    """Имитация работы с базой данных PostgreSQL."""
+
+    async def save(self, order: Order) -> None:
+        # Имитируем асинхронную задержку сети/диска
+        await asyncio.sleep(0.2)
+        print(
+            f"  💾 [PostgreSQL] Заказ '{order.id}' сохранен в БД. Сумма: {order.total_price.amount} {order.total_price.currency}"
+        )
+
+
+class KafkaNotificationService(NotificationService):
+    """Имитация работы с брокером сообщений Apache Kafka."""
+
+    async def send_order_created(self, order: Order) -> None:
+        # Имитируем асинхронную задержку брокера
+        await asyncio.sleep(0.1)
+        print(
+            f"  📡 [Kafka] Событие 'OrderCreated' отправлено в топик для заказа '{order.id}'"
+        )
+
+
+# =====================================================================
+# 4. APPLICATION LAYER (Сценарии использования / Use Cases)
+# =====================================================================
+
+
+class CreateOrderUseCase:
+    """Управляет процессом создания заказа.
+
+    Зависит только от абстракций (OrderRepository, NotificationService), а не от
+    конкретных БД/Kafka (Open/Closed Principle).
+    """
+
+    def __init__(
+        self, order_repo: OrderRepository, notifier: NotificationService
+    ):
+        # Внедрение зависимостей (Dependency Injection)
+        self._order_repo = order_repo
+        self._notifier = notifier
+
+    async def execute(
+        self, order_id: str, customer_id: str, items_prices: List[float]
+    ) -> Order:
+        print(f"⚙️  [UseCase] Начинаем оформление заказа '{order_id}'...")
+
+        # 1. Создаем доменную сущность
+        order = Order(order_id=order_id, customer_id=customer_id)
+        for price in items_prices:
+            order.add_item(Money(amount=price))
+
+        # 2. Параллельно сохраняем в БД и шлём событие в Kafka с помощью asyncio.gather
+        print("⚡ [UseCase] Выполняем I/O операции параллельно (async/await)...")
+        await asyncio.gather(
+            self._order_repo.save(order), self._notifier.send_order_created(order)
+        )
+
+        print(f"✅ [UseCase] Заказ '{order_id}' успешно обработан!")
+        return order
+
+
+# =====================================================================
+# 5. ENTRY POINT (Точка входа в приложение)
+# =====================================================================
+
+
+async def main():
+    print("=" * 60)
+    print("🚀 ЗАПУСК СИСТЕМЫ ОБРАБОТКИ ЗАКАЗОВ")
+    print("=" * 60)
+
+    # Собираем инфраструктуру
+    repository = PostgresOrderRepository()
+    notifier = KafkaNotificationService()
+
+    # Передаём инфраструктуру в бизнес-сценарий (DI)
+    use_case = CreateOrderUseCase(order_repo=repository, notifier=notifier)
+
+    # Выполняем сценарий с тестовыми данными
+    await use_case.execute(
+        order_id="ORD-9999",
+        customer_id="CUST-007",
+        items_prices=[1200.0, 3500.50, 800.0],
+    )
+
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
